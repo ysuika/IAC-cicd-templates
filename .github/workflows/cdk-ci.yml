@@ -240,7 +240,4 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      - name: Communication Check
-        run: |
-          echo "Information about this runner's IAM ID is as follows"
-          aws sts get-caller-identity
+
