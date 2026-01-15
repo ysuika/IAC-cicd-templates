@@ -1,0 +1,246 @@
+name: cdk ci
+
+on:
+  workflow_call:
+    inputs:        
+      TEST_ACCOUNT_NUMBER:
+        required: true
+        type: string
+      PROD_ACCOUNT_NUMBER:
+        required: true
+        type: string
+      ARTIFACT_BUCKET_NAME:
+        required: true
+        type: string
+      TOOL_BUCKET_NAME:
+        required: true
+        type: string
+      ORG_NAME:
+        required: true
+        type: string
+      PRODUCT_NAME:
+        required: true
+        type: string
+      MODULE_NAME:
+        required: true
+        type: string
+      KENOBI_VERSION:
+        required: true
+        type: string
+      VERSION_BUILDNUMBER_PARAM:
+        required: true
+        type: string
+
+      TEST_ENV:
+        required: false
+        default: test
+        type: string
+      PROD_ENV:
+        required: false
+        default: prod
+        type: string
+      AWS_DEFAULT_REGION:
+        required: false
+        default: ap-northeast-1
+        type: string
+      COMMUNICATION_CHECK_MATRIX:
+        required: false
+        default: '[{"runs_on": "[\"ubuntu-latest\"]"}]'
+        type: string
+        description: 'JSON array of matrix configurations for communication-check job. Each object should have a "runs_on" field with a JSON array string of runner labels.'
+
+# Explicitly revokes all default permissions.
+permissions: {}
+  
+jobs:
+  python-lint:
+    name: Python lint
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  python-scan:
+    name: Python scan
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  dockerfile-scan:
+    name: Dockerfile scan
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+  run-pytest:
+    name: Run Pytest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  generate-version:
+    name: Generate Version
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Generate Version
+        id: gen
+        run: |
+          echo "VERSION_FULL=v0.0.0" >> $GITHUB_OUTPUT
+    outputs:
+      VERSION_FULL: ${{ steps.gen.outputs.VERSION_FULL }}
+
+  syth-cdk-test:
+    name: Syth CDK Test
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    needs: [generate-version]
+    env:
+      VERSION_FULL: ${{ needs.generate-version.outputs.VERSION_FULL }}
+      ENV: ${{ inputs.TEST_ENV }}
+      CDK_DEFAULT_ACCOUNT: ${{ inputs.TEST_ACCOUNT_NUMBER }}
+      AWS_REGION: ${{ inputs.AWS_DEFAULT_REGION }}
+      BUILD_BASE:  target/build/${{ inputs.ORG_NAME }}/${{ inputs.ORG_NAME }}-${{ inputs.PRODUCT_NAME }}-${{ inputs.MODULE_NAME }}/${{ needs.generate-version.outputs.VERSION_FULL }}
+      TOOL_BUCKET_NAME: ${{ inputs.TOOL_BUCKET_NAME }}
+      KENOBI_VERSION: ${{ inputs.KENOBI_VERSION }}
+      ARTIFACT_BUCKET_NAME: ${{ inputs.ARTIFACT_BUCKET_NAME }}
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  syth-cdk-prod:
+    name: Syth CDK Prod
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    needs: [generate-version]
+    env: 
+      VERSION_FULL: ${{ needs.generate-version.outputs.VERSION_FULL }}
+      ENV: ${{ inputs.PROD_ENV }}
+      CDK_DEFAULT_ACCOUNT: ${{ inputs.PROD_ACCOUNT_NUMBER }}
+      AWS_REGION: ${{ inputs.AWS_DEFAULT_REGION }}
+      DEPLOYMENT_ROLE_ARN: arn:aws:iam::${{ inputs.PROD_ACCOUNT_NUMBER }}:role/deployment-role
+      BUILD_BASE:  target/build/${{ inputs.ORG_NAME }}/${{ inputs.ORG_NAME }}-${{ inputs.PRODUCT_NAME }}-${{ inputs.MODULE_NAME }}/${{ needs.generate-version.outputs.VERSION_FULL }}
+      ARTIFACT_BUCKET_NAME: ${{ inputs.ARTIFACT_BUCKET_NAME }}
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:  
+      - name: Checkout
+        uses: actions/checkout@v5
+
+
+  build-scan-push-lambda-image:
+    name: Build Scan Push Lambda Image
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    needs: [dockerfile-scan, generate-version]
+    env:
+      VERSION_FULL: ${{ needs.generate-version.outputs.VERSION_FULL }}
+      ECR_REPOSITORY_URI: ${{ inputs.PROD_ACCOUNT_NUMBER }}.dkr.ecr.${{ inputs.AWS_DEFAULT_REGION }}.amazonaws.com
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  review-test:
+    name: Review Test
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    needs: [generate-version, syth-cdk-test, build-scan-push-lambda-image]
+    env:
+      VERSION_FULL: ${{ needs.generate-version.outputs.VERSION_FULL }}
+      ENV: ${{ inputs.PROD_ENV }}
+      CDK_DEFAULT_ACCOUNT: ${{ inputs.PROD_ACCOUNT_NUMBER }}
+      AWS_REGION: ${{ inputs.AWS_DEFAULT_REGION }}
+      DIFF_ROLE_ARN: arn:aws:iam::${{ inputs.TEST_ACCOUNT_NUMBER }}:role/deployment-gitlab-runner-role
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  review-prod:
+    name: Review Prod
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    needs: [generate-version, syth-cdk-prod, build-scan-push-lambda-image]
+    env:
+      VERSION_FULL: ${{ needs.generate-version.outputs.VERSION_FULL }}
+      ENV: ${{ inputs.PROD_ENV }}
+      CDK_DEFAULT_ACCOUNT: ${{ inputs.PROD_ACCOUNT_NUMBER }}
+      AWS_REGION: ${{ inputs.AWS_DEFAULT_REGION }}
+      DIFF_ROLE_ARN: arn:aws:iam::${{ inputs.PROD_ACCOUNT_NUMBER }}:role/deployment-gitlab-runner-role
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  deploy-test:
+    name: Deploy Test
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    needs: [generate-version, syth-cdk-test, build-scan-push-lambda-image, review-test]
+    env:
+      VERSION_FULL: ${{ needs.generate-version.outputs.VERSION_FULL }}
+      ENV: ${{ inputs.TEST_ENV }}
+      CDK_DEFAULT_ACCOUNT: ${{ inputs.TEST_ACCOUNT_NUMBER }}
+      AWS_REGION: ${{ inputs.AWS_DEFAULT_REGION }}
+      DEPLOYMENT_ROLE_ARN: arn:aws:iam::${{ inputs.TEST_ACCOUNT_NUMBER }}:role/deployment-role
+      ARTIFACT_BUCKET_NAME: ${{ inputs.ARTIFACT_BUCKET_NAME }}
+    if: (github.event_name == 'pull_request' && contains(join(github.event.pull_request.labels.*.name, ','), 'deploy-to-test')) || (github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+  communication-check:
+    name: Communication Check
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    needs: [deploy-test]
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        include: ${{ fromJson(inputs.COMMUNICATION_CHECK_MATRIX) }}
+    runs-on: ${{ fromJson(matrix.runs_on) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Communication Check
+        run: |
+          echo "Information about this runner's IAM ID is as follows"
+          aws sts get-caller-identity
